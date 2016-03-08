@@ -8364,6 +8364,7 @@ ofputil_append_ofp15_group_desc_reply(const struct ofputil_group_desc *gds,
         ofputil_put_group_prop_ntr_selection_method(version, &gds->props,
                                                     reply);
     }
+    ogds = ofpbuf_at_assert(reply, start_ogds, sizeof *ogds);
     ogds->length = htons(reply->size - start_ogds);
 
     ofpmp_postappend(replies, start_ogds);
@@ -9504,7 +9505,8 @@ ofputil_decode_bundle_ctrl(const struct ofp_header *oh,
 {
     struct ofpbuf b = ofpbuf_const_initializer(oh, ntohs(oh->length));
     enum ofpraw raw = ofpraw_pull_assert(&b);
-    ovs_assert(raw == OFPRAW_OFPT14_BUNDLE_CONTROL);
+    ovs_assert(raw == OFPRAW_OFPT14_BUNDLE_CONTROL
+               || raw == OFPRAW_ONFT13_BUNDLE_CONTROL);
 
     const struct ofp14_bundle_ctrl_msg *m = b.msg;
     msg->bundle_id = ntohl(m->bundle_id);
@@ -9525,12 +9527,14 @@ ofputil_encode_bundle_ctrl_request(enum ofp_version ofp_version,
     case OFP10_VERSION:
     case OFP11_VERSION:
     case OFP12_VERSION:
-    case OFP13_VERSION:
-        ovs_fatal(0, "bundles need OpenFlow 1.4 or later "
+        ovs_fatal(0, "bundles need OpenFlow 1.3 or later "
                      "(\'-O OpenFlow14\')");
+    case OFP13_VERSION:
     case OFP14_VERSION:
     case OFP15_VERSION:
-        request = ofpraw_alloc(OFPRAW_OFPT14_BUNDLE_CONTROL, ofp_version, 0);
+        request = ofpraw_alloc(ofp_version == OFP13_VERSION
+                               ? OFPRAW_ONFT13_BUNDLE_CONTROL
+                               : OFPRAW_OFPT14_BUNDLE_CONTROL, ofp_version, 0);
         m = ofpbuf_put_zeros(request, sizeof *m);
 
         m->bundle_id = htonl(bc->bundle_id);
@@ -9551,7 +9555,9 @@ ofputil_encode_bundle_ctrl_reply(const struct ofp_header *oh,
     struct ofpbuf *buf;
     struct ofp14_bundle_ctrl_msg *m;
 
-    buf = ofpraw_alloc_reply(OFPRAW_OFPT14_BUNDLE_CONTROL, oh, 0);
+    buf = ofpraw_alloc_reply(oh->version == OFP13_VERSION
+                             ? OFPRAW_ONFT13_BUNDLE_CONTROL
+                             : OFPRAW_OFPT14_BUNDLE_CONTROL, oh, 0);
     m = ofpbuf_put_zeros(buf, sizeof *m);
 
     m->bundle_id = htonl(msg->bundle_id);
@@ -9645,6 +9651,7 @@ ofputil_is_bundlable(enum ofptype type)
     case OFPTYPE_TABLE_DESC_REPLY:
     case OFPTYPE_ROLE_STATUS:
     case OFPTYPE_REQUESTFORWARD:
+    case OFPTYPE_TABLE_STATUS:
     case OFPTYPE_NXT_TLV_TABLE_REQUEST:
     case OFPTYPE_NXT_TLV_TABLE_REPLY:
     case OFPTYPE_NXT_RESUME:
@@ -9661,7 +9668,8 @@ ofputil_decode_bundle_add(const struct ofp_header *oh,
 {
     struct ofpbuf b = ofpbuf_const_initializer(oh, ntohs(oh->length));
     enum ofpraw raw = ofpraw_pull_assert(&b);
-    ovs_assert(raw == OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE);
+    ovs_assert(raw == OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE
+               || raw == OFPRAW_ONFT13_BUNDLE_ADD_MESSAGE);
 
     const struct ofp14_bundle_ctrl_msg *m = ofpbuf_pull(&b, sizeof *m);
     msg->bundle_id = ntohl(m->bundle_id);
@@ -9708,7 +9716,9 @@ ofputil_encode_bundle_add(enum ofp_version ofp_version,
     struct ofp14_bundle_ctrl_msg *m;
 
     /* Must use the same xid as the embedded message. */
-    request = ofpraw_alloc_xid(OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE, ofp_version,
+    request = ofpraw_alloc_xid(ofp_version == OFP13_VERSION
+                               ? OFPRAW_ONFT13_BUNDLE_ADD_MESSAGE
+                               : OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE, ofp_version,
                                msg->msg->xid, 0);
     m = ofpbuf_put_zeros(request, sizeof *m);
 
@@ -10206,4 +10216,90 @@ ofputil_async_cfg_default(enum ofp_version version)
         .master[OAM_PORT_STATUS] = OFPPR_BITS,
         .slave[OAM_PORT_STATUS] = OFPPR_BITS,
     };
+}
+
+static void
+ofputil_put_ofp14_table_desc(const struct ofputil_table_desc *td,
+                             struct ofpbuf *b, enum ofp_version version)
+{
+    struct ofp14_table_desc *otd;
+    struct ofp14_table_mod_prop_vacancy *otv;
+    size_t start_otd;
+
+    start_otd = b->size;
+    ofpbuf_put_zeros(b, sizeof *otd);
+
+    ofpprop_put_u32(b, OFPTMPT14_EVICTION, td->eviction_flags);
+
+    otv = ofpbuf_put_zeros(b, sizeof *otv);
+    otv->type = htons(OFPTMPT14_VACANCY);
+    otv->length = htons(sizeof *otv);
+    otv->vacancy_down = td->table_vacancy.vacancy_down;
+    otv->vacancy_up = td->table_vacancy.vacancy_up;
+    otv->vacancy = td->table_vacancy.vacancy;
+
+    otd = ofpbuf_at_assert(b, start_otd, sizeof *otd);
+    otd->length = htons(b->size - start_otd);
+    otd->table_id = td->table_id;
+    otd->config = ofputil_encode_table_config(OFPUTIL_TABLE_MISS_DEFAULT,
+                                              td->eviction, td->vacancy,
+                                              version);
+}
+
+/* Converts the abstract form of a "table status" message in '*ts' into an
+ * OpenFlow message suitable for 'protocol', and returns that encoded form in
+ * a buffer owned by the caller. */
+struct ofpbuf *
+ofputil_encode_table_status(const struct ofputil_table_status *ts,
+                            enum ofputil_protocol protocol)
+{
+    enum ofp_version version;
+    struct ofpbuf *b;
+
+    version = ofputil_protocol_to_ofp_version(protocol);
+    if (version >= OFP14_VERSION) {
+        enum ofpraw raw;
+        struct ofp14_table_status *ots;
+
+        raw = OFPRAW_OFPT14_TABLE_STATUS;
+        b = ofpraw_alloc_xid(raw, version, htonl(0), 0);
+        ots = ofpbuf_put_zeros(b, sizeof *ots);
+        ots->reason = ts->reason;
+        ofputil_put_ofp14_table_desc(&ts->desc, b, version);
+        ofpmsg_update_length(b);
+        return b;
+    } else {
+        return NULL;
+    }
+}
+
+/* Decodes the OpenFlow "table status" message in '*ots' into an abstract form
+ * in '*ts'.  Returns 0 if successful, otherwise an OFPERR_* value. */
+enum ofperr
+ofputil_decode_table_status(const struct ofp_header *oh,
+                            struct ofputil_table_status *ts)
+{
+    const struct ofp14_table_status *ots;
+    struct ofpbuf b;
+    enum ofperr error;
+    enum ofpraw raw;
+
+    ofpbuf_use_const(&b, oh, ntohs(oh->length));
+    raw = ofpraw_pull_assert(&b);
+    ots = ofpbuf_pull(&b, sizeof *ots);
+
+    if (raw == OFPRAW_OFPT14_TABLE_STATUS) {
+        if (ots->reason != OFPTR_VACANCY_DOWN
+            && ots->reason != OFPTR_VACANCY_UP) {
+            return OFPERR_OFPBPC_BAD_VALUE;
+        }
+        ts->reason = ots->reason;
+
+        error = ofputil_decode_table_desc(&b, &ts->desc, oh->version);
+        return error;
+    } else {
+        return OFPERR_OFPBRC_BAD_VERSION;
+    }
+
+    return 0;
 }

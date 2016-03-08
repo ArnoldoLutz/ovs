@@ -1253,9 +1253,9 @@ decode_bundle(bool load, const struct nx_action_bundle *nab,
     for (i = 0; i < bundle->n_slaves; i++) {
         uint16_t ofp_port = ntohs(((ovs_be16 *)(nab + 1))[i]);
         ofpbuf_put(ofpacts, &ofp_port, sizeof ofp_port);
+        bundle = ofpacts->header;
     }
 
-    bundle = ofpacts->header;
     ofpact_finish(ofpacts, &bundle->ofpact);
 
     if (!error) {
@@ -7401,8 +7401,12 @@ ofpact_init(struct ofpact *ofpact, enum ofpact_type type, size_t len)
 void
 ofpact_finish(struct ofpbuf *ofpacts, struct ofpact *ofpact)
 {
+    ptrdiff_t len;
+
     ovs_assert(ofpact == ofpacts->header);
-    ofpact->len = (char *) ofpbuf_tail(ofpacts) - (char *) ofpact;
+    len = (char *) ofpbuf_tail(ofpacts) - (char *) ofpact;
+    ovs_assert(len > 0 && len <= UINT16_MAX);
+    ofpact->len = len;
     ofpbuf_padto(ofpacts, OFPACT_ALIGN(ofpacts->size));
 }
 

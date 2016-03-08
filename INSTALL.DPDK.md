@@ -36,11 +36,11 @@ on Debian/Ubuntu)
      Then run `make install` to build and install the library.
      For default install without IVSHMEM:
 
-     `make install T=x86_64-native-linuxapp-gcc`
+     `make install T=x86_64-native-linuxapp-gcc DESTDIR=install`
 
      To include IVSHMEM (shared memory):
 
-     `make install T=x86_64-ivshmem-linuxapp-gcc`
+     `make install T=x86_64-ivshmem-linuxapp-gcc DESTDIR=install`
 
      For further details refer to http://dpdk.org/
 
@@ -206,6 +206,26 @@ Using the DPDK with ovs-vswitchd:
    ./ovs-ofctl add-flow br0 in_port=1,action=output:2
    ./ovs-ofctl add-flow br0 in_port=2,action=output:1
    ```
+
+8. QoS usage example
+
+   Assuming you have a vhost-user port transmitting traffic consisting of
+   packets of size 64 bytes, the following command would limit the egress
+   transmission rate of the port to ~1,000,000 packets per second:
+
+   `ovs-vsctl set port vhost-user0 qos=@newqos -- --id=@newqos create qos
+   type=egress-policer other-config:cir=46000000 other-config:cbs=2048`
+
+   To examine the QoS configuration of the port:
+
+   `ovs-appctl -t ovs-vswitchd qos/show vhost-user0`
+
+   To clear the QoS configuration from the port and ovsdb use the following:
+
+   `ovs-vsctl destroy QoS vhost-user0 -- clear Port vhost-user0 qos`
+
+   For more details regarding egress-policer parameters please refer to the
+   vswitch.xml.
 
 Performance Tuning:
 -------------------
@@ -511,7 +531,8 @@ Adding DPDK vhost-user ports to the Switch:
 
 Following the steps above to create a bridge, you can now add DPDK vhost-user
 as a port to the vswitch. Unlike DPDK ring ports, DPDK vhost-user ports can
-have arbitrary names.
+have arbitrary names, except that forward and backward slashes are prohibited
+in the names.
 
   -  For vhost-user, the name of the port type is `dpdkvhostuser`
 
@@ -588,6 +609,22 @@ Follow the steps below to attach vhost-user port(s) to a VM.
    -netdev type=vhost-user,id=mynet2,chardev=char2,vhostforce,queues=$q
    -device virtio-net-pci,mac=00:00:00:00:00:02,netdev=mynet2,mq=on,vectors=$v
    ```
+
+   If one wishes to use multiple queues for an interface in the guest, the
+   driver in the guest operating system must be configured to do so. It is
+   recommended that the number of queues configured be equal to '$q'.
+
+   For example, this can be done for the Linux kernel virtio-net driver with:
+
+   ```
+   ethtool -L <DEV> combined <$q>
+   ```
+
+   A note on the command above:
+
+   `-L`: Changes the numbers of channels of the specified network device
+
+   `combined`: Changes the number of multi-purpose channels.
 
 DPDK vhost-cuse:
 ----------------
